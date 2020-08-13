@@ -1,27 +1,39 @@
 import argparse
-import face_recognition
-import cv2
 from datetime import datetime, timedelta
-import numpy as np
-import platform
 import pickle
+import platform
+import numpy as np
+import cv2
+import face_recognition
+import logging
 
-parser = argparse.ArgumentParser()
-parser.add_argument("-s", "--stream", required = False)
-parser.add_argument("-m", "--mode", required = False)
-parser.set_defaults(mode="local")
-args = parser.parse_args()
+PARSER = argparse.ArgumentParser()
+PARSER.add_argument("-s", "--stream", required=False)
+PARSER.add_argument("-m", "--mode", required=False)
+PARSER.add_argument("-r", "--resize", required=False, type=float)
+PARSER.add_argument("-v", "--show_video", required=False, type=bool)
+PARSER.set_defaults(mode="local")
+PARSER.set_defaults(resize=1)
+PARSER.set_defaults(show_video=False)
+ARGS = PARSER.parse_args()
+
+logging.basicConfig(
+    filename='doorcam.log',
+    filemode='a',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level = logging.INFO
+)
 
 # Our list of known face encodings and a matching list of metadata about each face.
 known_face_encodings = []
 known_face_metadata = []
-
 
 def save_known_faces():
     with open("known_faces.dat", "wb") as face_data_file:
         face_data = [known_face_encodings, known_face_metadata]
         pickle.dump(face_data, face_data_file)
         print("Known faces backed up to disk.")
+        logging.info("Known faces backed up to disk.")
 
 
 def load_known_faces():
@@ -31,6 +43,7 @@ def load_known_faces():
         with open("known_faces.dat", "rb") as face_data_file:
             known_face_encodings, known_face_metadata = pickle.load(face_data_file)
             print("Known faces loaded from disk.")
+            logging.info("Known faces loaded from disk.")
     except FileNotFoundError as e:
         print("No previous face data found - starting with a blank known face list.")
         pass
@@ -115,8 +128,9 @@ def lookup_known_face(face_encoding):
 
     return metadata
 
+def main_loop(mode="local", stream=None, resize=1.0, show_video=False):
 
-def main_loop(mode = "local", stream = None):
+    logging.info("starting program")
     # Get access to the webcam. The method is different depending on if this is running on a laptop or a Jetson Nano.
     if mode == "local":
         if running_on_jetson_nano():
@@ -129,6 +143,7 @@ def main_loop(mode = "local", stream = None):
     elif mode == "remote":
         video_capture = cv2.VideoCapture(stream)
 
+    logging.info(f'Running with parameters: mode={mode}, stream={stream}, resize={resize}')
     # Track how long since we last saved a copy of our known faces to disk as a backup.
     number_of_faces_since_save = 0
 
@@ -137,9 +152,9 @@ def main_loop(mode = "local", stream = None):
         ret, frame = video_capture.read()
 
         # proceed only when OpenCV managed to read the frame
-        if ret == True:
+        if ret:
             # Resize frame of video to 1/4 size for faster face recognition processing
-            small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+            small_frame = cv2.resize(frame, (0, 0), fx=resize, fy=resize)
 
             # Convert the image from BGR color (which OpenCV uses) to RGB color (which face_recognition uses)
             rgb_small_frame = small_frame[:, :, ::-1]
@@ -160,6 +175,8 @@ def main_loop(mode = "local", stream = None):
                     time_at_door = datetime.now() - metadata['first_seen_this_interaction']
                     face_label = f"At door {int(time_at_door.total_seconds())}s"
 
+                    visits = metadata['seen_count']
+                    visit_label = f"{visits} visits"
                 # If this is a brand new face, add it to our list of known faces
                 else:
                     face_label = "New visitor!"
@@ -170,55 +187,56 @@ def main_loop(mode = "local", stream = None):
                     face_image = cv2.resize(face_image, (150, 150))
 
                     # Add the new face to our known face data
-                    if(np.isnan(face_encoding).sum() == 0):
+                    if np.isnan(face_encoding).sum() == 0:
                         register_new_face(face_encoding, face_image)
 
+                    visits = 1
+                    visit_label = "First visit"
                 face_labels.append(face_label)
 
+                print(f"[{str(datetime.now())}] User with {visits} visits detected: {face_label}")
+                print(hash(str(np.array(metadata["face_image"]).flatten())))
+                logging.info(f"User with {visits} visits detected: {face_label}")
+
             # Draw a box around each face and label each face
-            for (top, right, bottom, left), face_label in zip(face_locations, face_labels):
-                # Scale back up face locations since the frame we detected in was scaled to 1/4 size
-                top *= 4
-                right *= 4
-                bottom *= 4
-                left *= 4
+            if show_video:
+                for (top, right, bottom, left), face_label in zip(face_locations, face_labels):
+                    # Scale back up face locations since the frame we detected in was scaled to 1/4 size
+                    top *= int(1.0/resize)
+                    right *= int(1.0/resize)
+                    bottom *= int(1.0/resize)
+                    left *= int(1.0/resize)
 
-                # Draw a box around the face
-                cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
+                    # Draw a box around the face
+                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
 
-                # Draw a label with a name below the face
-                cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED)
-                cv2.putText(frame, face_label, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+                    # Draw a label with a name below the face
+                    cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED)
+                    cv2.putText(frame, face_label, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
 
-            # Display recent visitor images
-            number_of_recent_visitors = 0
-            for metadata in known_face_metadata:
-                # If we have seen this person in the last minute, draw their image
-                if datetime.now() - metadata["last_seen"] < timedelta(seconds=10) and metadata["seen_frames"] > 5:
-                    # Draw the known face image
-                    x_position = number_of_recent_visitors * 150
-                    frame[30:180, x_position:x_position + 150] = metadata["face_image"]
-                    number_of_recent_visitors += 1
+                # Display recent visitor images
+                number_of_recent_visitors = 0
+                for metadata in known_face_metadata:
+                    # If we have seen this person in the last minute, draw their image
+                    if datetime.now() - metadata["last_seen"] < timedelta(seconds=10) and metadata["seen_frames"] > 5:
+                        # Draw the known face image
+                        x_position = number_of_recent_visitors * 150
+                        frame[30:180, x_position:x_position + 150] = metadata["face_image"]
+                        number_of_recent_visitors += 1
 
-                    # Label the image with how many times they have visited
-                    visits = metadata['seen_count']
-                    visit_label = f"{visits} visits"
-                    if visits == 1:
-                        visit_label = "First visit"
-                    cv2.putText(frame, visit_label, (x_position + 10, 170), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+                        # Label the image with how many times they have visited
+                        cv2.putText(frame, visit_label, (x_position + 10, 170), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
 
-            if number_of_recent_visitors > 0:
-                cv2.putText(frame, "Visitors at Door", (5, 18), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+                if number_of_recent_visitors > 0:
+                    cv2.putText(frame, "Visitors at Door", (5, 18), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
 
+                # Display the final frame of video with boxes drawn around each detected fames
+                cv2.imshow('Video', frame)
 
-
-            # Display the final frame of video with boxes drawn around each detected fames
-            cv2.imshow('Video', frame)
-
-            # Hit 'q' on the keyboard to quit!
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                save_known_faces()
-                break
+                # Hit 'q' on the keyboard to quit!
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    save_known_faces()
+                    break
 
             # We need to save our known faces back to disk every so often in case something crashes.
             if len(face_locations) > 0 and number_of_faces_since_save > 100:
@@ -230,8 +248,8 @@ def main_loop(mode = "local", stream = None):
     # Release handle to the webcam
     video_capture.release()
     cv2.destroyAllWindows()
-
+    logging.warning("program terminated")
 
 if __name__ == "__main__":
     load_known_faces()
-    main_loop(mode=args.mode, stream=args.stream)
+    main_loop(mode=ARGS.mode, stream=ARGS.stream, resize=ARGS.resize, show_video=ARGS.show_video)
