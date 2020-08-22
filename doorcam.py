@@ -4,6 +4,7 @@ import pickle
 import platform
 import numpy as np
 import cv2
+import psycopg2 as ps
 import face_recognition
 import logging
 
@@ -27,6 +28,8 @@ logging.basicConfig(
 # Our list of known face encodings and a matching list of metadata about each face.
 known_face_encodings = []
 known_face_metadata = []
+ids = []
+face_hashes = []
 
 def save_known_faces():
     with open("known_faces.dat", "wb") as face_data_file:
@@ -34,6 +37,78 @@ def save_known_faces():
         pickle.dump(face_data, face_data_file)
         print("Known faces backed up to disk.")
         logging.info("Known faces backed up to disk.")
+
+def open_close_connection(f):
+    conn = ps.connect("dbname=face_recognition user=am")
+    cur = conn.cursor()
+    f()
+    cur.close()
+    conn.close()
+
+def save_face_pg(face_encoding, face_image):
+
+    def list2pgarray(alist):
+        return '{' + ','.join([str(i) for i in alist]) + '}'
+
+    conn = ps.connect("dbname=face_recognition user=am")
+    cur = conn.cursor()
+
+    face_image = np.reshape(face_image, (67500))
+    fe_str = list2pgarray(face_encoding)
+    fi_str = list2pgarray(face_image)
+    face_hash = hash(str(face_encoding))
+
+    cur.execute("""
+        INSERT INTO face_info
+        (face_hash_value, face_embeddings, face_image)
+        VALUES (%s, %r, %r);
+        """
+        % (face_hash, fe_str, fi_str)
+    )
+    conn.commit()
+    print("new face has been enrolled!")
+    cur.execute("""
+        SELECT id FROM face_info
+        WHERE face_hash_value = %d;
+        """
+        %(face_hash)
+    )
+    res = cur.fetchone()
+    id = res[0]
+    
+    cur.close()
+    conn.close()
+    return id
+
+
+def load_known_faces_pg():
+
+    global known_face_encodings, known_face_metadata, ids, face_hashes 
+
+    conn = ps.connect("dbname=face_recognition user=am")
+    cur = conn.cursor()
+    
+
+    conn = ps.connect("dbname=face_recognition user=am")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            id,
+            face_hash_value,
+            face_embeddings
+        FROM face_info;
+        """)
+    result = cur.fetchall()
+    for face_id, face_hash, encoding in result:
+        known_face_encodings.append(encoding)
+        ids.append(face_id)
+        face_hashes.append(face_hash)
+
+    cur.close()
+    conn.close()
+    print("faces loaded from db")
+
+    return known_face_encodings
 
 
 def load_known_faces():
@@ -86,6 +161,18 @@ def register_new_face(face_encoding, face_image):
         "seen_frames": 1,
         "face_image": face_image,
     })
+
+
+def lookup_known_face_pg(face_encoding):
+
+    if not known_face_encodings:
+        return None
+
+    face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+    best_match_index = np.argmin(face_distances)
+    if face_distances[best_match_index] < 0.65:
+        metadata = ids[best_match_index]
+        return metadata
 
 
 def lookup_known_face(face_encoding):
@@ -168,19 +255,18 @@ def main_loop(mode="local", stream=None, resize=1.0, show_video=False):
             face_labels = []
             for face_location, face_encoding in zip(face_locations, face_encodings):
                 # See if this face is in our list of known faces.
-                metadata = lookup_known_face(face_encoding)
+                metadata = lookup_known_face_pg(face_encoding)
 
                 # If we found the face, label the face with some useful information.
                 if metadata is not None:
-                    time_at_door = datetime.now() - metadata['first_seen_this_interaction']
-                    face_label = f"At door {int(time_at_door.total_seconds())}s"
+                    # time_at_door = datetime.now() - metadata['first_seen_this_interaction']
+                    # face_label = f"At door {int(time_at_door.total_seconds())}s"
 
-                    visits = metadata['seen_count']
-                    visit_label = f"{visits} visits"
+                    # visits = metadata['seen_count']
+                    # visit_label = f"{visits} visits"
+                    face_label = f"User # {metadata}"
                 # If this is a brand new face, add it to our list of known faces
                 else:
-                    face_label = "New visitor!"
-
                     # Grab the image of the the face from the current frame of video
                     top, right, bottom, left = face_location
                     face_image = small_frame[top:bottom, left:right]
@@ -188,15 +274,19 @@ def main_loop(mode="local", stream=None, resize=1.0, show_video=False):
 
                     # Add the new face to our known face data
                     if np.isnan(face_encoding).sum() == 0:
-                        register_new_face(face_encoding, face_image)
+                        # register_new_face(face_encoding, face_image)
+                        face_id = save_face_pg(face_encoding, face_image)
+                        ids.append(face_id)
+                        known_face_encodings.append(face_encoding)
 
                     visits = 1
                     visit_label = "First visit"
+                    face_label = f"New visitor! User #{face_id}"
                 face_labels.append(face_label)
 
-                print(f"[{str(datetime.now())}] User with {visits} visits detected: {face_label}")
-                print(hash(str(np.array(metadata["face_image"]).flatten())))
-                logging.info(f"User with {visits} visits detected: {face_label}")
+                # print(f"[{str(datetime.now())}] User with {visits} visits detected: {face_label}")
+                # logging.info(f"User with {visits} visits detected: {face_label}")
+                print(f"[{str(datetime.now())}] {face_label}")
 
             # Draw a box around each face and label each face
             if show_video:
@@ -251,5 +341,7 @@ def main_loop(mode="local", stream=None, resize=1.0, show_video=False):
     logging.warning("program terminated")
 
 if __name__ == "__main__":
-    load_known_faces()
+    # load_known_faces()
+    known_face_encodings = load_known_faces_pg()
+    
     main_loop(mode=ARGS.mode, stream=ARGS.stream, resize=ARGS.resize, show_video=ARGS.show_video)
