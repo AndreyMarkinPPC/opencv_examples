@@ -5,8 +5,10 @@ import platform
 import numpy as np
 import cv2
 import psycopg2 as ps
+from influxdb import InfluxDBClient
 import face_recognition
 import logging
+import config
 
 PARSER = argparse.ArgumentParser()
 PARSER.add_argument("-s", "--stream", required=False)
@@ -30,6 +32,9 @@ known_face_encodings = []
 known_face_metadata = []
 ids = []
 face_hashes = []
+
+client = InfluxDBClient(config.INFLUX_DB_ADDRESS, 8086)
+client.switch_database(config.INFLUX_TABLE)
 
 def save_known_faces():
     with open("known_faces.dat", "wb") as face_data_file:
@@ -175,6 +180,20 @@ def lookup_known_face_pg(face_encoding):
         return metadata
 
 
+def write_face_info_to_influx(face_id, client):
+    json_body = [
+    {
+        "measurement": "presense",
+        "tags": {
+            "user":f"{face_id}"
+        },
+        "fields": {
+            "value": 1
+        }
+    }
+    ]
+    client.write_points(json_body)
+
 def lookup_known_face(face_encoding):
     """
     See if this is a face we already have in our face list
@@ -255,16 +274,16 @@ def main_loop(mode="local", stream=None, resize=1.0, show_video=False):
             face_labels = []
             for face_location, face_encoding in zip(face_locations, face_encodings):
                 # See if this face is in our list of known faces.
-                metadata = lookup_known_face_pg(face_encoding)
+                face_id = lookup_known_face_pg(face_encoding)
 
                 # If we found the face, label the face with some useful information.
-                if metadata is not None:
+                if face_id is not None:
                     # time_at_door = datetime.now() - metadata['first_seen_this_interaction']
                     # face_label = f"At door {int(time_at_door.total_seconds())}s"
 
                     # visits = metadata['seen_count']
                     # visit_label = f"{visits} visits"
-                    face_label = f"User # {metadata}"
+                    face_label = f"User # {face_id}"
                 # If this is a brand new face, add it to our list of known faces
                 else:
                     # Grab the image of the the face from the current frame of video
@@ -283,6 +302,7 @@ def main_loop(mode="local", stream=None, resize=1.0, show_video=False):
                     visit_label = "First visit"
                     face_label = f"New visitor! User #{face_id}"
                 face_labels.append(face_label)
+                write_face_info_to_influx(face_id, client)
 
                 # print(f"[{str(datetime.now())}] User with {visits} visits detected: {face_label}")
                 # logging.info(f"User with {visits} visits detected: {face_label}")
