@@ -254,11 +254,20 @@ def main_loop(mode="local", stream=None, resize=1.0, show_video=False):
     number_of_faces_since_save = 0
 
     while True:
+        index = 0
         # Grab a single frame of video
         ret, frame = video_capture.read()
+        index+=1
+        if index > 60:
+            video_capture.release()
+            video_capture = cv2.VideoCapture(stream)
+            logging.warning("Reinitialized the camera")
 
         # proceed only when OpenCV managed to read the frame
         if ret:
+
+            index-=1
+
             # Resize frame of video to 1/4 size for faster face recognition processing
             small_frame = cv2.resize(frame, (0, 0), fx=resize, fy=resize)
 
